@@ -32,6 +32,9 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('audio:start-capture', async (_event, sampleRate?: number): Promise<void> => {
+    // TODO: Forward audioCapture.onError events over IPC so the renderer can
+    // display a warning when system audio fails (e.g. Screen Recording revoked).
+    // Currently errors are logged to console but the UI has no signal.
     // Subscribe to audio chunks and forward to all renderer windows
     if (!audioChunkUnsubscribe) {
       audioChunkUnsubscribe = audioCapture.onAudioChunk((source, samples, timestamp) => {

@@ -294,6 +294,10 @@ static Napi::Value StartCapture(const Napi::CallbackInfo &info) {
     }
 
     // Start system audio capture (async)
+    // TODO: If stopCapture() is called before this completion fires, the stream
+    // can end up running with released TSFNs. Add a cancelled/stopping guard here
+    // that suppresses late starts. Low practical risk — SCK starts in milliseconds
+    // and the app never rapid-toggles capture.
     [g_screenCapturer startWithSampleRate:sampleRate
                                completion:^(NSError *error) {
         if (error) {
@@ -343,6 +347,10 @@ static Napi::Value StopCapture(const Napi::CallbackInfo &info) {
     }
 
     // Stop system audio (async) — defer state transition until SCK confirms stop
+    // TODO: Release the system TSFN via a block dispatched to _captureQueue AFTER
+    // the stop completion, to ensure all in-flight didOutputSampleBuffer callbacks
+    // have drained before the TSFN is freed. Currently harmless (napi returns
+    // napi_closing on a released TSFN) but would leak an AudioChunkData.
     if (g_screenCapturer) {
         // Capture the TSFN pointer for the completion block
         napi_threadsafe_function systemTSFN = g_systemTSFN;
