@@ -1,0 +1,35 @@
+appId: com.cereal.app
+productName: Cereal
+directories:
+  buildResources: build
+  output: dist
+files:
+  - "out/**/*"
+  - "!node_modules"
+extraResources:
+  - from: "src/native/build/Release/"
+    to: "native/"
+    filter:
+      - "*.node"
+  - from: "resources/icons/"
+    to: "icons/"
+    filter:
+      - "tray-bowl.png"
+      - "tray-bowl@2x.png"
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  category: public.app-category.productivity
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
