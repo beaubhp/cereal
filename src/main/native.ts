@@ -8,7 +8,7 @@ interface HelloAddon {
 let helloAddon: HelloAddon | null = null
 let loadError: string | null = null
 
-function getAddonPath(addonName: string): string {
+export function getAddonPath(addonName: string): string {
   if (app.isPackaged) {
     return join(process.resourcesPath, 'native', `${addonName}.node`)
   }

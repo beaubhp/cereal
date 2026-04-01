@@ -5,3 +5,4 @@ cmake_policy(SET CMP0042 NEW)
 project(cereal-native)
 
 add_subdirectory(hello)
+add_subdirectory(audio-capture)
