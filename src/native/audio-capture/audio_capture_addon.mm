@@ -113,29 +113,22 @@ static Napi::Value CheckPermissions(const Napi::CallbackInfo &info) {
         bool hasAccess = CGPreflightScreenCaptureAccess();
         result.Set("screenRecording", hasAccess ? "granted" : "denied");
     } else {
-        // On macOS 12.3–14.x, probe via CGWindowListCopyWindowInfo
-        CFArrayRef windowList = CGWindowListCopyWindowInfo(
-            kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
-        if (windowList) {
-            bool hasNames = false;
-            CFIndex count = CFArrayGetCount(windowList);
-            for (CFIndex i = 0; i < count && !hasNames; i++) {
-                CFDictionaryRef dict = (CFDictionaryRef)CFArrayGetValueAtIndex(windowList, i);
-                CFStringRef name = (CFStringRef)CFDictionaryGetValue(dict, kCGWindowName);
-                if (name && CFStringGetLength(name) > 0) {
-                    CFNumberRef pidRef = (CFNumberRef)CFDictionaryGetValue(dict, kCGWindowOwnerPID);
-                    pid_t windowPid = 0;
-                    if (pidRef) CFNumberGetValue(pidRef, kCFNumberIntType, &windowPid);
-                    if (windowPid != getpid()) {
-                        hasNames = true;
-                    }
-                }
+        // On macOS 12.3–14.x, probe via SCShareableContent enumeration.
+        // If Screen Recording is not granted, the completion handler returns
+        // an empty applications list (displays may still be returned).
+        // This is a synchronous wait on an async API, but it's only used for
+        // the permission check path which is called infrequently.
+        __block bool hasAccess = false;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [SCShareableContent getShareableContentWithCompletionHandler:
+            ^(SCShareableContent *content, NSError *error) {
+            if (!error && content && content.applications.count > 0) {
+                hasAccess = true;
             }
-            CFRelease(windowList);
-            result.Set("screenRecording", hasNames ? "granted" : "denied");
-        } else {
-            result.Set("screenRecording", "denied");
-        }
+            dispatch_semaphore_signal(sem);
+        }];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        result.Set("screenRecording", hasAccess ? "granted" : "denied");
     }
 
     return result;
@@ -181,10 +174,9 @@ static Napi::Value RequestPermissions(const Napi::CallbackInfo &info) {
                                     0, 1, nullptr, nullptr, nullptr,
                                     PermissionResultCallJS, &tsfn);
 
-    // Request screen recording first (opens System Settings, non-blocking)
-    if (@available(macOS 15.0, *)) {
-        CGRequestScreenCaptureAccess();
-    }
+    // Request screen recording (opens System Settings, non-blocking)
+    // CGRequestScreenCaptureAccess() is available since macOS 10.15
+    CGRequestScreenCaptureAccess();
 
     // Request microphone permission (shows dialog, async)
     [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio
@@ -350,28 +342,34 @@ static Napi::Value StopCapture(const Napi::CallbackInfo &info) {
         g_micTSFN = nullptr;
     }
 
-    // Stop system audio (async) — release TSFN in completion block
+    // Stop system audio (async) — defer state transition until SCK confirms stop
     if (g_screenCapturer) {
         // Capture the TSFN pointer for the completion block
         napi_threadsafe_function systemTSFN = g_systemTSFN;
+        napi_threadsafe_function errorTSFN = g_errorTSFN;
         g_systemTSFN = nullptr; // Prevent double-release
+        g_errorTSFN = nullptr;
 
         [g_screenCapturer stopWithCompletion:^(NSError *error) {
             // Now it's safe to release — SCK has confirmed no more callbacks
             if (systemTSFN) {
                 napi_release_threadsafe_function(systemTSFN, napi_tsfn_release);
             }
+            if (errorTSFN) {
+                napi_release_threadsafe_function(errorTSFN, napi_tsfn_release);
+            }
             g_screenCapturer = nil;
+            g_state = CaptureState::Idle;
         }];
+    } else {
+        // No screen capturer — clean up error TSFN and transition immediately
+        if (g_errorTSFN) {
+            napi_release_threadsafe_function(g_errorTSFN, napi_tsfn_release);
+            g_errorTSFN = nullptr;
+        }
+        g_state = CaptureState::Idle;
     }
 
-    // Release error TSFN
-    if (g_errorTSFN) {
-        napi_release_threadsafe_function(g_errorTSFN, napi_tsfn_release);
-        g_errorTSFN = nullptr;
-    }
-
-    g_state = CaptureState::Idle;
     deferred.Resolve(env.Undefined());
     return deferred.Promise();
 }
