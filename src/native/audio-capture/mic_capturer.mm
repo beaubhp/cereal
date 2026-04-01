@@ -14,6 +14,7 @@ static double MicHostTimeToSeconds(uint64_t hostTime) {
 
 @implementation MicCapturer {
     AVAudioEngine *_engine;
+    AVAudioMixerNode *_mixerNode;
     napi_threadsafe_function _tsfn;
     BOOL _running;
 }
@@ -40,19 +41,31 @@ static double MicHostTimeToSeconds(uint64_t hostTime) {
     _engine = [[AVAudioEngine alloc] init];
     AVAudioInputNode *inputNode = [_engine inputNode];
 
-    // Target format: mono, specified sample rate, Float32
+    // AVAudioInputNode rejects taps with non-native formats. Route through a
+    // mixer node instead — the engine handles sample rate conversion internally.
     AVAudioFormat *targetFormat = [[AVAudioFormat alloc]
         initStandardFormatWithSampleRate:sampleRate
                                 channels:1];
 
-    // Install tap on input node
-    // Buffer size of 4096 at 16kHz = ~256ms chunks
+    _mixerNode = [[AVAudioMixerNode alloc] init];
+    [_engine attachNode:_mixerNode];
+    [_engine connect:inputNode to:_mixerNode format:nil];
+    [_engine connect:_mixerNode to:[_engine mainMixerNode] format:targetFormat];
+
+    // Mute the engine output. AVAudioEngine requires all non-output nodes to
+    // have a downstream connection (to mainMixerNode) or it refuses to start,
+    // but this is a capture-only pipeline — we never want mic audio playing
+    // back through the speakers. Setting outputVolume to 0 on this engine's
+    // mainMixerNode silences it without affecting any other engine instance.
+    [_engine mainMixerNode].outputVolume = 0.0f;
+
+    // Buffer size of 4096 at 16kHz ≈ 256ms chunks
     napi_threadsafe_function tsfn = _tsfn;
 
-    [inputNode installTapOnBus:0
-                    bufferSize:4096
-                        format:targetFormat
-                         block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
+    [_mixerNode installTapOnBus:0
+                     bufferSize:4096
+                         format:nil
+                          block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
         if (!buffer || buffer.frameLength == 0) return;
 
         const float *channelData = buffer.floatChannelData[0];
@@ -63,7 +76,9 @@ static double MicHostTimeToSeconds(uint64_t hostTime) {
         chunk->samples = new float[frameCount];
         memcpy(chunk->samples, channelData, frameCount * sizeof(float));
         chunk->sampleCount = frameCount;
-        chunk->timestamp = MicHostTimeToSeconds(when.hostTime);
+        chunk->timestamp = when.isHostTimeValid
+            ? MicHostTimeToSeconds(when.hostTime)
+            : MicHostTimeToSeconds(mach_absolute_time());
 
         napi_call_threadsafe_function(tsfn, chunk, napi_tsfn_nonblocking);
     }];
@@ -71,7 +86,8 @@ static double MicHostTimeToSeconds(uint64_t hostTime) {
     NSError *startError = nil;
     [_engine startAndReturnError:&startError];
     if (startError) {
-        [inputNode removeTapOnBus:0];
+        [_mixerNode removeTapOnBus:0];
+        _mixerNode = nil;
         _engine = nil;
         if (error) *error = startError;
         return NO;
@@ -84,9 +100,9 @@ static double MicHostTimeToSeconds(uint64_t hostTime) {
 - (void)stop {
     if (!_running) return;
 
-    AVAudioInputNode *inputNode = [_engine inputNode];
-    [inputNode removeTapOnBus:0];
+    [_mixerNode removeTapOnBus:0];
     [_engine stop];
+    _mixerNode = nil;
     _engine = nil;
     _running = NO;
 }
