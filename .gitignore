@@ -1,0 +1,10 @@
+node_modules/
+dist/
+out/
+build/
+*.node
+.DS_Store
+*.tsbuildinfo
+.context/
+cereal-tmp/
+src/native/build/
