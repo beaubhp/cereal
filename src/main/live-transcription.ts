@@ -85,6 +85,7 @@ class LiveTranscriptionService {
   private pendingSegments: PendingSegment[] = []
   private nextSequence = 1
   private handlingFatalError = false
+  private teardownPromise: Promise<void> | null = null
 
   constructor() {
     this.client.onSegment((event) => {
@@ -96,11 +97,18 @@ class LiveTranscriptionService {
   }
 
   async start(): Promise<void> {
+    if (this.teardownPromise) {
+      await this.teardownPromise
+    }
+
     if (this.state === 'recording' || this.state === 'starting') {
       return
     }
     if (this.state === 'stopping') {
       throw new Error('Transcription is stopping')
+    }
+    if (this.state === 'error') {
+      throw new Error('Transcription is recovering from a previous failure')
     }
 
     ensureSupportedMacOS()
@@ -150,13 +158,20 @@ class LiveTranscriptionService {
         message,
         fatal: true
       })
-      await this.teardown(false)
-      this.state = 'idle'
+      try {
+        await this.beginTeardown(false)
+      } finally {
+        this.state = 'idle'
+      }
       throw error
     }
   }
 
   async stop(): Promise<void> {
+    if (this.teardownPromise) {
+      await this.teardownPromise
+      return
+    }
     if (this.state === 'idle') {
       return
     }
@@ -244,9 +259,12 @@ class LiveTranscriptionService {
     if (event.type === 'fatal' && !this.handlingFatalError) {
       this.handlingFatalError = true
       this.state = 'error'
-      await this.teardown(true)
-      this.state = 'idle'
-      this.handlingFatalError = false
+      try {
+        await this.beginTeardown(true)
+      } finally {
+        this.state = 'idle'
+        this.handlingFatalError = false
+      }
     }
   }
 
@@ -316,6 +334,22 @@ class LiveTranscriptionService {
     }
 
     this.resetSessionState()
+  }
+
+  private beginTeardown(skipSessionStop: boolean): Promise<void> {
+    if (this.teardownPromise) {
+      return this.teardownPromise
+    }
+
+    this.teardownPromise = (async () => {
+      try {
+        await this.teardown(skipSessionStop)
+      } finally {
+        this.teardownPromise = null
+      }
+    })()
+
+    return this.teardownPromise
   }
 
   private async stopCaptureOnly(): Promise<void> {

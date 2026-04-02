@@ -21,6 +21,7 @@ actor WhisperPipeline {
     private let sampleRate = 16000
     private let eagerInferenceSeconds = 0.8
     private let idleInferenceSeconds = 1.5
+    private let stopWaitTimeoutSeconds = 5.0
     private let trimContextSeconds = 5.0
     private let activityRmsThreshold: Float = 0.003
     private let activityPeakThreshold: Float = 0.015
@@ -131,11 +132,15 @@ actor WhisperPipeline {
         pendingSources.removeAll()
         pendingSourceSet.removeAll()
 
+        let stopDeadline = Date().addingTimeInterval(stopWaitTimeoutSeconds)
         while activeSource != nil {
+            if Date() >= stopDeadline {
+                break
+            }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
 
-        if command.flush {
+        if command.flush && activeSource == nil {
             for source in StreamSource.allCases where shouldFlushOnStop(for: source) {
                 await runInferencePass(for: source, force: true)
             }
