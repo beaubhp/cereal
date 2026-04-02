@@ -1,13 +1,25 @@
 import { ipcMain, BrowserWindow } from 'electron'
-import type { AppStatus, NativePingResult, PermissionState, CaptureState } from '../shared/ipc-types'
+import type {
+  AppStatus,
+  NativePingResult,
+  PermissionState,
+  CaptureState,
+  TranscriptionState
+} from '../shared/ipc-types'
 import { loadHelloAddon, getLoadError } from './native'
 import * as audioCapture from './audio-capture'
+import * as liveTranscription from './live-transcription'
 
 let audioChunkUnsubscribe: (() => void) | null = null
+let transcriptSegmentUnsubscribe: (() => void) | null = null
+let transcriptionErrorUnsubscribe: (() => void) | null = null
 
 export function registerIpcHandlers(): void {
   ipcMain.handle('app:get-status', (): AppStatus => {
-    return { state: 'idle' }
+    const transcriptionState = liveTranscription.getTranscriptionState()
+    return {
+      state: transcriptionState === 'starting' || transcriptionState === 'recording' ? 'recording' : 'idle'
+    }
   })
 
   ipcMain.handle('native:ping', (): NativePingResult => {
@@ -59,4 +71,39 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('audio:get-state', (): CaptureState => {
     return audioCapture.getCaptureState()
   })
+
+  ipcMain.handle('transcription:start-live', async (): Promise<void> => {
+    ensureTranscriptionEventSubscriptions()
+    await liveTranscription.startLiveTranscription()
+  })
+
+  ipcMain.handle('transcription:stop-live', async (): Promise<void> => {
+    await liveTranscription.stopLiveTranscription()
+  })
+
+  ipcMain.handle('transcription:get-state', (): TranscriptionState => {
+    return liveTranscription.getTranscriptionState()
+  })
+}
+
+function ensureTranscriptionEventSubscriptions(): void {
+  if (!transcriptSegmentUnsubscribe) {
+    transcriptSegmentUnsubscribe = liveTranscription.onTranscriptSegment((segment) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('transcription:segment', segment)
+        }
+      }
+    })
+  }
+
+  if (!transcriptionErrorUnsubscribe) {
+    transcriptionErrorUnsubscribe = liveTranscription.onTranscriptionError((error) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('transcription:error', error)
+        }
+      }
+    })
+  }
 }

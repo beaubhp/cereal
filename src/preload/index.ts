@@ -18,6 +18,27 @@ const api: IpcApi = {
     return () => {
       ipcRenderer.removeListener('audio:chunk', handler)
     }
+  },
+  startLiveTranscription: () => ipcRenderer.invoke('transcription:start-live'),
+  stopLiveTranscription: () => ipcRenderer.invoke('transcription:stop-live'),
+  getTranscriptionState: () => ipcRenderer.invoke('transcription:get-state'),
+  onTranscriptSegment: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, segment: unknown): void => {
+      callback(segment as Parameters<typeof callback>[0])
+    }
+    ipcRenderer.on('transcription:segment', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:segment', handler)
+    }
+  },
+  onTranscriptionError: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, error: unknown): void => {
+      callback(error as Parameters<typeof callback>[0])
+    }
+    ipcRenderer.on('transcription:error', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:error', handler)
+    }
   }
 }
 
