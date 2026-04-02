@@ -64,6 +64,20 @@ struct ErrorData {
     char message[256];
 };
 
+static void EmitErrorToJS(napi_threadsafe_function tsfn, NSString *message) {
+    if (!tsfn) {
+        return;
+    }
+
+    auto *errData = new ErrorData();
+    snprintf(errData->message, sizeof(errData->message), "%s", message.UTF8String);
+
+    napi_status status = napi_call_threadsafe_function(tsfn, errData, napi_tsfn_nonblocking);
+    if (status != napi_ok) {
+        delete errData;
+    }
+}
+
 // Error TSFN callback — runs on JS thread
 static void ErrorCallJS(napi_env env, napi_value jsCb, void *context, void *data) {
     if (!env || !data) {
@@ -271,15 +285,18 @@ static Napi::Value StartCapture(const Napi::CallbackInfo &info) {
     // Create capturers
     g_micCapturer = [[MicCapturer alloc] initWithTSFN:g_micTSFN];
     g_screenCapturer = [[ScreenAudioCapturer alloc] initWithTSFN:g_systemTSFN];
+    ScreenAudioCapturer *screenCapturer = g_screenCapturer;
 
     // Wire up SCK error handler — surfaces unexpected stops to JS
-    napi_threadsafe_function errorTSFN = g_errorTSFN;
     g_screenCapturer.onError = ^(NSError *error) {
-        auto *errData = new ErrorData();
-        snprintf(errData->message, sizeof(errData->message),
-                 "System audio stream stopped: %s",
-                 error.localizedDescription.UTF8String);
-        napi_call_threadsafe_function(errorTSFN, errData, napi_tsfn_nonblocking);
+        napi_threadsafe_function errorTSFN = g_errorTSFN;
+        if (!errorTSFN) {
+            return;
+        }
+
+        NSString *message = [NSString stringWithFormat:@"System audio stream stopped: %@",
+                                                       error.localizedDescription];
+        EmitErrorToJS(errorTSFN, message);
     };
 
     // Start mic capture (synchronous)
@@ -294,24 +311,28 @@ static Napi::Value StartCapture(const Napi::CallbackInfo &info) {
     }
 
     // Start system audio capture (async)
-    // TODO: If stopCapture() is called before this completion fires, the stream
-    // can end up running with released TSFNs. Add a cancelled/stopping guard here
-    // that suppresses late starts. Low practical risk — SCK starts in milliseconds
-    // and the app never rapid-toggles capture.
-    [g_screenCapturer startWithSampleRate:sampleRate
-                               completion:^(NSError *error) {
+    [screenCapturer startWithSampleRate:sampleRate
+                             completion:^(NSError *error) {
+        if (screenCapturer != g_screenCapturer ||
+            g_state == CaptureState::Stopping ||
+            g_state == CaptureState::Idle) {
+            return;
+        }
+
         if (error) {
             // System audio failed — log the error via error TSFN
             // Keep mic running so the user still gets "Me" audio
-            auto *errData = new ErrorData();
-            snprintf(errData->message, sizeof(errData->message),
-                     "System audio capture failed (mic still active): %s",
-                     error.localizedDescription.UTF8String);
-            napi_call_threadsafe_function(errorTSFN, errData, napi_tsfn_nonblocking);
+            napi_threadsafe_function errorTSFN = g_errorTSFN;
+            NSString *message = [NSString stringWithFormat:
+                @"System audio capture failed (mic still active): %@",
+                error.localizedDescription];
+            EmitErrorToJS(errorTSFN, message);
 
             // Release only the system TSFN since system capturer won't produce data
-            napi_release_threadsafe_function(g_systemTSFN, napi_tsfn_release);
-            g_systemTSFN = nullptr;
+            if (g_systemTSFN) {
+                napi_release_threadsafe_function(g_systemTSFN, napi_tsfn_release);
+                g_systemTSFN = nullptr;
+            }
             g_screenCapturer = nil;
         }
         // State transitions to Recording regardless — mic is running
@@ -347,27 +368,27 @@ static Napi::Value StopCapture(const Napi::CallbackInfo &info) {
     }
 
     // Stop system audio (async) — defer state transition until SCK confirms stop
-    // TODO: Release the system TSFN via a block dispatched to _captureQueue AFTER
-    // the stop completion, to ensure all in-flight didOutputSampleBuffer callbacks
-    // have drained before the TSFN is freed. Currently harmless (napi returns
-    // napi_closing on a released TSFN) but would leak an AudioChunkData.
     if (g_screenCapturer) {
-        // Capture the TSFN pointer for the completion block
+        ScreenAudioCapturer *screenCapturer = g_screenCapturer;
         napi_threadsafe_function systemTSFN = g_systemTSFN;
         napi_threadsafe_function errorTSFN = g_errorTSFN;
-        g_systemTSFN = nullptr; // Prevent double-release
+        g_systemTSFN = nullptr;
         g_errorTSFN = nullptr;
+        screenCapturer.onError = nil;
 
-        [g_screenCapturer stopWithCompletion:^(NSError *error) {
-            // Now it's safe to release — SCK has confirmed no more callbacks
-            if (systemTSFN) {
-                napi_release_threadsafe_function(systemTSFN, napi_tsfn_release);
-            }
-            if (errorTSFN) {
-                napi_release_threadsafe_function(errorTSFN, napi_tsfn_release);
-            }
-            g_screenCapturer = nil;
-            g_state = CaptureState::Idle;
+        [screenCapturer stopWithCompletion:^(NSError *error) {
+            [screenCapturer detachTSFNOnCaptureQueueWithCompletion:^{
+                if (systemTSFN) {
+                    napi_release_threadsafe_function(systemTSFN, napi_tsfn_release);
+                }
+                if (errorTSFN) {
+                    napi_release_threadsafe_function(errorTSFN, napi_tsfn_release);
+                }
+                if (g_screenCapturer == screenCapturer) {
+                    g_screenCapturer = nil;
+                }
+                g_state = CaptureState::Idle;
+            }];
         }];
     } else {
         // No screen capturer — clean up error TSFN and transition immediately

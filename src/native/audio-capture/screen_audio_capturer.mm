@@ -6,7 +6,10 @@
     SCStream *_stream;
     napi_threadsafe_function _tsfn;
     BOOL _running;
+    BOOL _starting;
+    BOOL _stopRequested;
     dispatch_queue_t _captureQueue;
+    void (^_pendingStopCompletion)(NSError *);
 }
 
 - (instancetype)initWithTSFN:(napi_threadsafe_function)tsfn {
@@ -14,15 +17,43 @@
     if (self) {
         _tsfn = tsfn;
         _running = NO;
+        _starting = NO;
+        _stopRequested = NO;
         _captureQueue = dispatch_queue_create("com.cereal.screen-audio-capture",
                                                DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
 
+- (void)finishPendingStopWithError:(NSError *)error {
+    void (^pendingStopCompletion)(NSError *) = _pendingStopCompletion;
+    _pendingStopCompletion = nil;
+    _stream = nil;
+    _running = NO;
+    _starting = NO;
+    _stopRequested = NO;
+
+    if (pendingStopCompletion) {
+        pendingStopCompletion(error);
+    }
+}
+
+- (void)stopActiveStreamWithCompletion:(void (^)(NSError *))completion {
+    if (!_stream) {
+        completion(nil);
+        return;
+    }
+
+    [_stream stopCaptureWithCompletionHandler:^(NSError *error) {
+        self->_stream = nil;
+        self->_running = NO;
+        completion(error);
+    }];
+}
+
 - (void)startWithSampleRate:(double)sampleRate
                  completion:(void (^)(NSError *))completion {
-    if (_running) {
+    if (_running || _starting) {
         NSError *err = [NSError errorWithDomain:@"ScreenAudioCapturer"
                                            code:1
                                        userInfo:@{NSLocalizedDescriptionKey: @"Already running"}];
@@ -30,10 +61,19 @@
         return;
     }
 
+    _starting = YES;
+    _stopRequested = NO;
+
     // Enumerate shareable content to get the main display
     [SCShareableContent getShareableContentWithCompletionHandler:
         ^(SCShareableContent *content, NSError *error) {
+        if (self->_stopRequested) {
+            [self finishPendingStopWithError:nil];
+            return;
+        }
+
         if (error || !content) {
+            self->_starting = NO;
             completion(error ?: [NSError errorWithDomain:@"ScreenAudioCapturer"
                                                     code:2
                                                 userInfo:@{NSLocalizedDescriptionKey:
@@ -43,6 +83,7 @@
 
         SCDisplay *display = content.displays.firstObject;
         if (!display) {
+            self->_starting = NO;
             completion([NSError errorWithDomain:@"ScreenAudioCapturer"
                                           code:3
                                       userInfo:@{NSLocalizedDescriptionKey:
@@ -88,34 +129,76 @@
                     sampleHandlerQueue:self->_captureQueue
                                  error:&addOutputError];
         if (addOutputError) {
+            self->_stream = nil;
+            self->_starting = NO;
             completion(addOutputError);
+            return;
+        }
+
+        if (self->_stopRequested) {
+            [self finishPendingStopWithError:nil];
             return;
         }
 
         // Start capturing
         [self->_stream startCaptureWithCompletionHandler:^(NSError *startError) {
+            self->_starting = NO;
+
             if (startError) {
                 self->_stream = nil;
-                completion(startError);
+                if (self->_stopRequested) {
+                    [self finishPendingStopWithError:nil];
+                } else {
+                    completion(startError);
+                }
             } else {
                 self->_running = YES;
-                completion(nil);
+                if (self->_stopRequested) {
+                    [self stopActiveStreamWithCompletion:^(NSError *stopError) {
+                        [self finishPendingStopWithError:stopError];
+                    }];
+                } else {
+                    completion(nil);
+                }
             }
         }];
     }];
 }
 
 - (void)stopWithCompletion:(void (^)(NSError *))completion {
+    if (_stopRequested) {
+        if (completion) {
+            completion(nil);
+        }
+        return;
+    }
+
+    if (_starting && !_running) {
+        _stopRequested = YES;
+        _pendingStopCompletion = [completion copy];
+        return;
+    }
+
     if (!_running || !_stream) {
         completion(nil);
         return;
     }
 
-    [_stream stopCaptureWithCompletionHandler:^(NSError *error) {
-        self->_stream = nil;
-        self->_running = NO;
+    _stopRequested = YES;
+    [self stopActiveStreamWithCompletion:^(NSError *error) {
+        self->_starting = NO;
+        self->_stopRequested = NO;
         completion(error);
     }];
+}
+
+- (void)detachTSFNOnCaptureQueueWithCompletion:(dispatch_block_t)completion {
+    dispatch_async(_captureQueue, ^{
+        self->_tsfn = nullptr;
+        if (completion) {
+            completion();
+        }
+    });
 }
 
 #pragma mark - SCStreamOutput
@@ -125,6 +208,7 @@
                    ofType:(SCStreamOutputType)type {
     if (type != SCStreamOutputTypeAudio) return;
     if (!CMSampleBufferDataIsReady(sampleBuffer)) return;
+    if (_tsfn == nullptr) return;
 
     // Get the audio buffer list
     CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
@@ -183,7 +267,10 @@
     chunk->sampleCount = sampleCount;
     chunk->timestamp = timestamp;
 
-    napi_call_threadsafe_function(_tsfn, chunk, napi_tsfn_nonblocking);
+    napi_status napiStatus = napi_call_threadsafe_function(_tsfn, chunk, napi_tsfn_nonblocking);
+    if (napiStatus != napi_ok) {
+        delete chunk;
+    }
 }
 
 #pragma mark - SCStreamDelegate

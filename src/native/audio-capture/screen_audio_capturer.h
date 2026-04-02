@@ -10,6 +10,7 @@
 - (void)startWithSampleRate:(double)sampleRate
                  completion:(void (^)(NSError *))completion;
 - (void)stopWithCompletion:(void (^)(NSError *))completion;
+- (void)detachTSFNOnCaptureQueueWithCompletion:(dispatch_block_t)completion;
 
 @property (nonatomic, copy) void (^onError)(NSError *);
 
