@@ -3,7 +3,8 @@
 
 // Check if ScreenCaptureKit is available at runtime
 static bool isScreenCaptureKitAvailable() {
-    // ScreenCaptureKit requires macOS 12.3+
+    // ScreenCaptureKit shipped in macOS 12.3+, though the app's
+    // transcription runtime now targets macOS 14+ because of WhisperKit.
     if (@available(macOS 12.3, *)) {
         // Try to load the framework dynamically
         NSBundle *bundle = [NSBundle bundleWithPath:@"/System/Library/Frameworks/ScreenCaptureKit.framework"];

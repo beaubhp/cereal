@@ -25,6 +25,24 @@ export interface AudioChunk {
   timestamp: number
 }
 
+export type TranscriptionState = 'idle' | 'starting' | 'recording' | 'stopping' | 'error'
+
+export interface TranscriptSegment {
+  id: string
+  source: 'mic' | 'system'
+  isMe: boolean
+  text: string
+  startTimeSec: number
+  endTimeSec: number
+  sequence: number
+}
+
+export interface TranscriptionError {
+  code: string
+  message: string
+  fatal: boolean
+}
+
 export interface IpcApi {
   getStatus: () => Promise<AppStatus>
   nativePing: () => Promise<NativePingResult>
@@ -35,4 +53,10 @@ export interface IpcApi {
   stopCapture: () => Promise<void>
   getCaptureState: () => Promise<CaptureState>
   onAudioChunk: (callback: (chunk: AudioChunk) => void) => () => void
+  // Real-time transcription
+  startLiveTranscription: () => Promise<void>
+  stopLiveTranscription: () => Promise<void>
+  getTranscriptionState: () => Promise<TranscriptionState>
+  onTranscriptSegment: (callback: (segment: TranscriptSegment) => void) => () => void
+  onTranscriptionError: (callback: (error: TranscriptionError) => void) => () => void
 }

@@ -14,7 +14,6 @@ static double MicHostTimeToSeconds(uint64_t hostTime) {
 
 @implementation MicCapturer {
     AVAudioEngine *_engine;
-    AVAudioMixerNode *_mixerNode;
     napi_threadsafe_function _tsfn;
     BOOL _running;
 }
@@ -40,36 +39,80 @@ static double MicHostTimeToSeconds(uint64_t hostTime) {
 
     _engine = [[AVAudioEngine alloc] init];
     AVAudioInputNode *inputNode = [_engine inputNode];
+    AVAudioFormat *inputFormat = [inputNode outputFormatForBus:0];
+    if (inputFormat.channelCount == 0 || inputFormat.sampleRate <= 0) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"MicCapturer"
+                                         code:2
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"Microphone input format is unavailable"}];
+        }
+        _engine = nil;
+        return NO;
+    }
 
-    // AVAudioInputNode rejects taps with non-native formats. Route through a
-    // mixer node instead — the engine handles sample rate conversion internally.
+    // Tap the hardware input directly in its native format, then explicitly
+    // downmix/resample to 16 kHz mono before forwarding chunks to JS.
     AVAudioFormat *targetFormat = [[AVAudioFormat alloc]
         initStandardFormatWithSampleRate:sampleRate
                                 channels:1];
-
-    _mixerNode = [[AVAudioMixerNode alloc] init];
-    [_engine attachNode:_mixerNode];
-    [_engine connect:inputNode to:_mixerNode format:nil];
-    [_engine connect:_mixerNode to:[_engine mainMixerNode] format:targetFormat];
-
-    // Mute the engine output. AVAudioEngine requires all non-output nodes to
-    // have a downstream connection (to mainMixerNode) or it refuses to start,
-    // but this is a capture-only pipeline — we never want mic audio playing
-    // back through the speakers. Setting outputVolume to 0 on this engine's
-    // mainMixerNode silences it without affecting any other engine instance.
-    [_engine mainMixerNode].outputVolume = 0.0f;
+    AVAudioConverter *converter = [[AVAudioConverter alloc]
+        initFromFormat:inputFormat
+              toFormat:targetFormat];
+    if (!converter) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"MicCapturer"
+                                         code:3
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         @"Failed to create microphone audio converter"}];
+        }
+        _engine = nil;
+        return NO;
+    }
 
     // Buffer size of 4096 at 16kHz ≈ 256ms chunks
     napi_threadsafe_function tsfn = _tsfn;
 
-    [_mixerNode installTapOnBus:0
+    [inputNode installTapOnBus:0
                      bufferSize:4096
-                         format:nil
+                         format:inputFormat
                           block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
         if (!buffer || buffer.frameLength == 0) return;
 
-        const float *channelData = buffer.floatChannelData[0];
-        size_t frameCount = buffer.frameLength;
+        AVAudioFrameCount convertedCapacity = (AVAudioFrameCount)MAX(
+            1.0,
+            ceil((double)buffer.frameLength * sampleRate / inputFormat.sampleRate)
+        );
+        AVAudioPCMBuffer *convertedBuffer = [[AVAudioPCMBuffer alloc]
+            initWithPCMFormat:targetFormat
+                frameCapacity:convertedCapacity];
+        if (!convertedBuffer) return;
+
+        __block BOOL suppliedInput = NO;
+        NSError *conversionError = nil;
+        AVAudioConverterOutputStatus status = [converter convertToBuffer:convertedBuffer
+                                                                  error:&conversionError
+                                                     withInputFromBlock:^AVAudioBuffer *_Nullable(
+            AVAudioPacketCount inNumPackets,
+            AVAudioConverterInputStatus *outStatus
+        ) {
+            if (suppliedInput) {
+                *outStatus = AVAudioConverterInputStatus_NoDataNow;
+                return nil;
+            }
+
+            suppliedInput = YES;
+            *outStatus = AVAudioConverterInputStatus_HaveData;
+            return buffer;
+        }];
+
+        if (status != AVAudioConverterOutputStatus_HaveData || convertedBuffer.frameLength == 0) {
+            return;
+        }
+
+        const float *channelData = convertedBuffer.floatChannelData[0];
+        if (!channelData) return;
+        size_t frameCount = convertedBuffer.frameLength;
 
         // Copy audio data - the buffer is only valid during this callback
         auto *chunk = new AudioChunkData();
@@ -84,10 +127,10 @@ static double MicHostTimeToSeconds(uint64_t hostTime) {
     }];
 
     NSError *startError = nil;
+    [_engine prepare];
     [_engine startAndReturnError:&startError];
     if (startError) {
-        [_mixerNode removeTapOnBus:0];
-        _mixerNode = nil;
+        [inputNode removeTapOnBus:0];
         _engine = nil;
         if (error) *error = startError;
         return NO;
@@ -100,9 +143,8 @@ static double MicHostTimeToSeconds(uint64_t hostTime) {
 - (void)stop {
     if (!_running) return;
 
-    [_mixerNode removeTapOnBus:0];
+    [[_engine inputNode] removeTapOnBus:0];
     [_engine stop];
-    _mixerNode = nil;
     _engine = nil;
     _running = NO;
 }

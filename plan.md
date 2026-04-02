@@ -10,7 +10,7 @@ This document is the step-by-step build plan for the Locally MVP. Each step is s
 
 - Electron app (not native SwiftUI)
 - ScreenCaptureKit for audio capture (requires native addon)
-- WhisperKit for real-time transcription (requires native addon)
+- WhisperKit for real-time transcription (via Swift helper executable)
 - Pyannote for post-meeting speaker diarization
 - Qwen 3.5 9B (Q4_K_M, 5.7 GB) via MLX for summarization
 - SQLite + FTS5 for local storage and search
@@ -28,9 +28,9 @@ This document is the step-by-step build plan for the Locally MVP. Each step is s
 1. Initialize Electron project with electron-forge or electron-builder. Use TypeScript for the renderer and main process.
 2. Set up the menu bar agent using a Tray icon (electron `Tray` API). The app should launch into the system tray, not as a window. Clicking the tray icon opens a popover window.
 3. Configure native addon build toolchain:
-   - Install `node-addon-api` or set up `napi-rs` (Rust → Node bindings). We need this because ScreenCaptureKit and WhisperKit are native Swift/ObjC APIs.
+   - Install `node-addon-api` or set up `napi-rs` (Rust → Node bindings) for thin native macOS bridges.
    - Set up `node-gyp` or `cmake-js` for compiling native modules.
-   - Create a `native/` directory for all Swift/ObjC bridge code.
+   - Create a `native/` directory for native bridges and helper packages.
    - Verify a trivial native addon compiles and is callable from the Electron main process.
 4. Set up basic IPC between main process and renderer (we'll use this extensively later).
 5. Configure electron-builder for macOS `.dmg` distribution:
@@ -77,21 +77,21 @@ This document is the step-by-step build plan for the Locally MVP. Each step is s
 **Testing:** Record a 30-second audio clip from a test Zoom call. Verify you get two separate PCM streams (mic and system). Save them as .wav files and play them back to confirm quality and separation.
 
 **Key technical notes:**
-- ScreenCaptureKit requires macOS 12.3+. This is fine since we're Apple Silicon only (M1 shipped with macOS 11, all now on 12+).
+- ScreenCaptureKit requires macOS 12.3+, but once transcription lands the app floor becomes macOS 14+ because WhisperKit currently targets macOS 14+.
 - The native addon must be compiled as a universal binary (arm64) for Apple Silicon.
 - Audio buffers should be kept in memory only — never written to disk. This is a core privacy guarantee.
 
 ---
 
-## Step 2: Real-Time Transcription (Native Addon)
+## Step 2: Real-Time Transcription (Swift Helper)
 
-**Goal:** Feed the captured audio streams into WhisperKit and get real-time text transcription back in the Electron main process.
+**Goal:** Feed the captured audio streams into WhisperKit and get real-time text transcription back in the Electron main process via a dedicated Swift helper.
 
 **Tasks:**
 
-1. Build a second native addon (or extend the audio capture addon) that wraps WhisperKit:
+1. Build a Swift helper executable that wraps WhisperKit:
    - WhisperKit is a Swift package: https://github.com/argmaxinc/WhisperKit
-   - Add WhisperKit as a Swift Package Manager dependency in the native addon's build
+   - Add WhisperKit as a Swift Package Manager dependency in the helper package build
    - Use the `large-v3` model (~3 GB). This will be bundled with the app.
 
 2. Implement a streaming transcription pipeline:
@@ -106,6 +106,7 @@ This document is the step-by-step build plan for the Locally MVP. Each step is s
    - `transcriber.startTranscription()` — begin processing audio chunks
    - `transcriber.onSegment(callback)` — fires for each transcribed segment
    - `transcriber.stopTranscription()` — stop and clean up
+   - The Electron main process communicates with the helper over stdin/stdout using newline-delimited JSON
 
 4. Wire audio capture → transcription:
    - In the Electron main process, pipe audio chunks from Step 1 into the transcriber from Step 2
@@ -115,7 +116,7 @@ This document is the step-by-step build plan for the Locally MVP. Each step is s
 5. Bundle the Whisper model:
    - The `large-v3` model files (~3 GB) must be included in the app bundle
    - Place them in `Contents/Resources/models/whisper-large-v3/`
-   - The native addon should accept a path to the model directory
+   - The helper should accept a path to the model directory
 
 **Testing:** Join a test Google Meet call. Start capture + transcription. Verify you get live text segments with correct `isMe` attribution. Verify latency is under 2 seconds from speech to text appearance. Verify CPU/memory usage stays reasonable (should be ~2-3 GB RAM for WhisperKit).
 
@@ -661,13 +662,13 @@ Meeting ends (detected by Step 3)
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐  │
 │  │  Audio       │  │  Transcriber │  │  SQLite DAL       │  │
 │  │  Capture     │  │  (WhisperKit)│  │  (better-sqlite3) │  │
-│  │  (native)    │  │  (native)    │  │                   │  │
+│  │  (native)    │  │  (helper)    │  │                   │  │
 │  └──────────────┘  └──────────────┘  └───────────────────┘  │
 │         │                  │                                 │
-│    Native Addons (Swift/ObjC compiled with node-addon-api)   │
+│   Native Addons for thin bridges + helper processes for ML  │
 │         │                  │                                 │
 │  ┌──────┴──────────────────┴───────────────────────────────┐ │
-│  │  macOS APIs: ScreenCaptureKit, AVFoundation, EventKit   │ │
+│  │  macOS APIs + Core ML / WhisperKit runtime              │ │
 │  └─────────────────────────────────────────────────────────┘ │
 │                                                              │
 │  ┌──────────────┐  ┌──────────────┐                         │
@@ -704,7 +705,7 @@ locally/
 │   │   ├── ipc.ts                   # IPC handlers
 │   │   ├── meeting-detector.ts      # Meeting detection service
 │   │   ├── audio-capture.ts         # JS wrapper around native addon
-│   │   ├── transcriber.ts           # JS wrapper around native addon
+│   │   ├── transcriber.ts           # JS wrapper around helper process
 │   │   ├── post-meeting-pipeline.ts # Orchestrates diarization + summarization
 │   │   ├── database.ts              # SQLite DAL (better-sqlite3)
 │   │   └── preferences.ts           # electron-store wrapper
@@ -731,10 +732,13 @@ locally/
 │       │   ├── binding.gyp
 │       │   ├── AudioCapture.swift   # ScreenCaptureKit wrapper
 │       │   └── AudioCaptureAddon.mm # Node addon bridge
-│       └── transcriber/
-│           ├── binding.gyp
-│           ├── Transcriber.swift    # WhisperKit wrapper
-│           └── TranscriberAddon.mm  # Node addon bridge
+│       └── transcriber-helper/
+│           ├── Package.swift
+│           └── Sources/
+│               └── TranscriberHelper/
+│                   ├── main.swift
+│                   ├── Protocol.swift
+│                   └── WhisperPipeline.swift
 │
 ├── python/                          # Python components
 │   ├── diarize.py                   # Pyannote speaker diarization
@@ -765,7 +769,7 @@ locally/
 |------|------|------------|-----------------|
 | 0 | Project scaffolding, Electron + native addon toolchain | Nothing | 3-4 days |
 | 1 | Audio capture (ScreenCaptureKit native addon) | Step 0 | 5-7 days |
-| 2 | Real-time transcription (WhisperKit native addon) | Step 0, Step 1 | 5-7 days |
+| 2 | Real-time transcription (WhisperKit helper) | Step 0, Step 1 | 5-7 days |
 | 3 | Meeting detection (process monitoring + notifications) | Step 0 | 2-3 days |
 | 4 | SQLite database + data access layer | Step 0 | 2-3 days |
 | 5 | Post-meeting speaker diarization (Pyannote) | Step 1, Step 4 | 4-5 days |
