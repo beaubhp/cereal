@@ -21,6 +21,8 @@ add_library(audio_capture SHARED
   audio_capture_addon.mm
   mic_capturer.mm
   screen_audio_capturer.mm
+  meeting_detector.mm
+  window_title_matcher.mm
 )
 
 # Set properties for Node.js native addon
@@ -35,6 +37,8 @@ set_source_files_properties(
   audio_capture_addon.mm
   mic_capturer.mm
   screen_audio_capturer.mm
+  meeting_detector.mm
+  window_title_matcher.mm
   PROPERTIES COMPILE_FLAGS "-x objective-c++ -fmodules"
 )
 
@@ -42,6 +46,7 @@ set_source_files_properties(
 target_link_libraries(audio_capture
   ${CMAKE_JS_LIB}
   "-framework Foundation"
+  "-framework AppKit"
   "-framework ScreenCaptureKit"
   "-framework CoreMedia"
   "-framework AVFoundation"

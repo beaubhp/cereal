@@ -43,6 +43,21 @@ export interface TranscriptionError {
   fatal: boolean
 }
 
+// Meeting detection
+export type MeetingDetectionState = 'idle' | 'meeting-detected' | 'recording'
+
+export interface MeetingInfo {
+  app: string // Display name: "Zoom", "Google Meet", "Call in Chrome", etc.
+  bundleId: string // Source bundle ID
+}
+
+export interface MeetingDetectionEvent {
+  type: 'meeting-started' | 'meeting-ended' | 'prompt-shown'
+  meeting: MeetingInfo
+}
+
+export type MeetingPromptResponse = 'yes' | 'no' | 'always' | 'never'
+
 export interface IpcApi {
   getStatus: () => Promise<AppStatus>
   nativePing: () => Promise<NativePingResult>
@@ -59,4 +74,10 @@ export interface IpcApi {
   getTranscriptionState: () => Promise<TranscriptionState>
   onTranscriptSegment: (callback: (segment: TranscriptSegment) => void) => () => void
   onTranscriptionError: (callback: (error: TranscriptionError) => void) => () => void
+  // Meeting detection
+  getMeetingDetectionState: () => Promise<MeetingDetectionState>
+  respondToMeetingPrompt: (response: MeetingPromptResponse) => Promise<void>
+  getCurrentMeeting: () => Promise<MeetingInfo | null>
+  onMeetingEvent: (callback: (event: MeetingDetectionEvent) => void) => () => void
+  onMeetingStateChange: (callback: (state: MeetingDetectionState) => void) => () => void
 }

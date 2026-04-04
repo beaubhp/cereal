@@ -1,6 +1,8 @@
 #import "audio_capture_addon.h"
 #import "mic_capturer.h"
 #import "screen_audio_capturer.h"
+#import "meeting_detector.h"
+#import "window_title_matcher.h"
 #import <AVFoundation/AVFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <mach/mach_time.h>
@@ -401,6 +403,9 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("startCapture", Napi::Function::New(env, StartCapture));
     exports.Set("stopCapture", Napi::Function::New(env, StopCapture));
     exports.Set("getCaptureState", Napi::Function::New(env, GetCaptureState));
+    exports.Set("startMeetingMonitor", Napi::Function::New(env, StartMeetingMonitor));
+    exports.Set("stopMeetingMonitor", Napi::Function::New(env, StopMeetingMonitor));
+    exports.Set("queryBrowserWindows", Napi::Function::New(env, QueryBrowserWindows));
     return exports;
 }
 

@@ -4,15 +4,21 @@ import type {
   NativePingResult,
   PermissionState,
   CaptureState,
-  TranscriptionState
+  TranscriptionState,
+  MeetingDetectionState,
+  MeetingPromptResponse
 } from '../shared/ipc-types'
 import { loadHelloAddon, getLoadError } from './native'
 import * as audioCapture from './audio-capture'
 import * as liveTranscription from './live-transcription'
+import * as meetingDetector from './meeting-detector'
 
 let audioChunkUnsubscribe: (() => void) | null = null
 let transcriptSegmentUnsubscribe: (() => void) | null = null
 let transcriptionErrorUnsubscribe: (() => void) | null = null
+let meetingEventUnsubscribe: (() => void) | null = null
+let meetingStateUnsubscribe: (() => void) | null = null
+let meetingRecordingUnsubscribe: (() => void) | null = null
 
 export function registerIpcHandlers(): void {
   ipcMain.handle('app:get-status', (): AppStatus => {
@@ -84,6 +90,58 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('transcription:get-state', (): TranscriptionState => {
     return liveTranscription.getTranscriptionState()
   })
+
+  // Meeting detection handlers
+  ipcMain.handle('meeting:get-state', (): MeetingDetectionState => {
+    return meetingDetector.getMeetingDetectionState()
+  })
+
+  ipcMain.handle('meeting:respond', async (_event, response: MeetingPromptResponse): Promise<void> => {
+    meetingDetector.respondToMeetingPrompt(response)
+  })
+
+  ipcMain.handle('meeting:get-current', () => {
+    return meetingDetector.getCurrentMeeting()
+  })
+
+  ensureMeetingEventSubscriptions()
+  ensureMeetingRecordingSubscription()
+}
+
+function ensureMeetingEventSubscriptions(): void {
+  if (!meetingEventUnsubscribe) {
+    meetingEventUnsubscribe = meetingDetector.onMeetingEvent((event) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('meeting:event', event)
+        }
+      }
+    })
+  }
+
+  if (!meetingStateUnsubscribe) {
+    meetingStateUnsubscribe = meetingDetector.onMeetingStateChange((state) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('meeting:state-changed', state)
+        }
+      }
+    })
+  }
+}
+
+function ensureMeetingRecordingSubscription(): void {
+  if (!meetingRecordingUnsubscribe) {
+    meetingRecordingUnsubscribe = meetingDetector.onRecordingRequest(async () => {
+      try {
+        ensureTranscriptionEventSubscriptions()
+        await liveTranscription.startLiveTranscription()
+        meetingDetector.setMeetingRecording()
+      } catch (err) {
+        console.error('Failed to start recording from meeting prompt:', err)
+      }
+    })
+  }
 }
 
 function ensureTranscriptionEventSubscriptions(): void {
