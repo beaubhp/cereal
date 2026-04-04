@@ -1,24 +1,41 @@
 import { app, BrowserWindow, Tray, nativeImage, screen } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
+import * as meetingDetector from './meeting-detector'
+import type { MeetingDetectionState } from '../shared/ipc-types'
 
 let tray: Tray | null = null
 let popoverWindow: BrowserWindow | null = null
 let isQuitting = false
 
-function getTrayIconPath(): string {
-  if (app.isPackaged) {
-    return join(process.resourcesPath, 'icons', 'tray-bowl.png')
+function getTrayIconName(state: MeetingDetectionState): string {
+  switch (state) {
+    case 'meeting-detected':
+      return 'tray-bowl-detected'
+    case 'recording':
+      return 'tray-bowl-recording'
+    default:
+      return 'tray-bowl'
   }
-
-  return join(__dirname, '../../resources/icons/tray-bowl.png')
 }
 
-function loadTrayIcon(): Electron.NativeImage {
-  const icon = nativeImage.createFromPath(getTrayIconPath())
+function getTrayIconPath(iconName = 'tray-bowl'): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'icons', `${iconName}.png`)
+  }
+
+  return join(__dirname, `../../resources/icons/${iconName}.png`)
+}
+
+function loadTrayIcon(iconName = 'tray-bowl'): Electron.NativeImage {
+  const icon = nativeImage.createFromPath(getTrayIconPath(iconName))
 
   if (icon.isEmpty()) {
-    console.error(`Failed to load tray icon from ${getTrayIconPath()}`)
+    // Fall back to default icon if state-specific icon is missing
+    if (iconName !== 'tray-bowl') {
+      return loadTrayIcon('tray-bowl')
+    }
+    console.error(`Failed to load tray icon from ${getTrayIconPath(iconName)}`)
     return nativeImage.createEmpty()
   }
 
@@ -108,6 +125,14 @@ export function createTray(): void {
       positionWindowBelowTray(popoverWindow, bounds)
       popoverWindow.show()
     }
+  })
+
+  // Update tray icon based on meeting detection state
+  meetingDetector.onMeetingStateChange((state) => {
+    if (!tray) return
+    const iconName = getTrayIconName(state)
+    const icon = loadTrayIcon(iconName)
+    tray.setImage(icon)
   })
 }
 

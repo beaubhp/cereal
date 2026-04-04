@@ -39,6 +39,28 @@ const api: IpcApi = {
     return () => {
       ipcRenderer.removeListener('transcription:error', handler)
     }
+  },
+  // Meeting detection
+  getMeetingDetectionState: () => ipcRenderer.invoke('meeting:get-state'),
+  respondToMeetingPrompt: (response) => ipcRenderer.invoke('meeting:respond', response),
+  getCurrentMeeting: () => ipcRenderer.invoke('meeting:get-current'),
+  onMeetingEvent: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: unknown): void => {
+      callback(data as Parameters<typeof callback>[0])
+    }
+    ipcRenderer.on('meeting:event', handler)
+    return () => {
+      ipcRenderer.removeListener('meeting:event', handler)
+    }
+  },
+  onMeetingStateChange: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: unknown): void => {
+      callback(state as Parameters<typeof callback>[0])
+    }
+    ipcRenderer.on('meeting:state-changed', handler)
+    return () => {
+      ipcRenderer.removeListener('meeting:state-changed', handler)
+    }
   }
 }
 
