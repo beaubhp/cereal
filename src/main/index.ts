@@ -13,28 +13,30 @@ process.on('unhandledRejection', (reason) => {
 })
 
 // Prevent double-launch — a second instance would spawn a parallel meeting
-// detection poller and double-fire notifications
+// detection poller and double-fire notifications. app.quit() is async, so we
+// must skip the rest of setup explicitly to avoid registering whenReady handlers
+// that race with shutdown.
 if (!app.requestSingleInstanceLock()) {
   app.quit()
+} else {
+  // Hide dock icon — this is a menu bar app
+  app.dock?.hide()
+
+  app.whenReady().then(() => {
+    registerIpcHandlers()
+    logTranscriptionPlatformSupportWarning()
+    createTray()
+    startMeetingDetection()
+  })
+
+  app.on('render-process-gone', (_event, _webContents, details) => {
+    console.error('Renderer process gone:', details)
+  })
+
+  app.on('child-process-gone', (_event, details) => {
+    console.error('Child process gone:', details)
+  })
+
+  // Don't quit on window close — the app lives in the tray
+  app.on('window-all-closed', () => {})
 }
-
-// Hide dock icon — this is a menu bar app
-app.dock?.hide()
-
-app.whenReady().then(() => {
-  registerIpcHandlers()
-  logTranscriptionPlatformSupportWarning()
-  createTray()
-  startMeetingDetection()
-})
-
-app.on('render-process-gone', (_event, _webContents, details) => {
-  console.error('Renderer process gone:', details)
-})
-
-app.on('child-process-gone', (_event, details) => {
-  console.error('Child process gone:', details)
-})
-
-// Don't quit on window close — the app lives in the tray
-app.on('window-all-closed', () => {})
