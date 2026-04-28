@@ -64,6 +64,11 @@ class MeetingDetectorService {
   private graceTimer: ReturnType<typeof setTimeout> | null = null
   private userResponded = false
   private lastMicDeactivationTime: number | null = null
+  // Bundle IDs whose mic is currently active. Updated synchronously in
+  // handleMicEvent so async identification (queryBrowserWindows) can detect
+  // a deactivation that happened during its await and bail before pinning a
+  // phantom meeting.
+  private readonly activeMicBundleIds = new Set<string>()
 
   private readonly eventListeners = new Set<EventListener>()
   private readonly stateListeners = new Set<StateListener>()
@@ -94,6 +99,7 @@ class MeetingDetectorService {
     }
 
     this.clearGraceTimer()
+    this.activeMicBundleIds.clear()
 
     if (this.currentMeeting) {
       this.emitEvent({ type: 'meeting-ended', meeting: this.currentMeeting })
@@ -151,10 +157,12 @@ class MeetingDetectorService {
 
   private handleMicEvent: MicEventListener = (event) => {
     if (event.micActive) {
+      this.activeMicBundleIds.add(event.bundleId)
       this.handleMicActivated(event.bundleId).catch((err) => {
         console.error('Meeting detection error:', err)
       })
     } else {
+      this.activeMicBundleIds.delete(event.bundleId)
       this.handleMicDeactivated(event.bundleId)
     }
   }
@@ -188,6 +196,11 @@ class MeetingDetectorService {
 
     // Skip unknown apps — only notify for recognized meeting apps and browsers
     if (!displayName) return
+
+    // Re-check after await: the mic may have deactivated while identifyApp was
+    // running (SCShareableContent has 1–2s first-call latency). Without this,
+    // we'd pin a phantom meeting that never receives a deactivation event.
+    if (!this.activeMicBundleIds.has(bundleId)) return
 
     // Re-check after await — another event may have claimed the slot while we yielded
     if (this.currentMeeting) return

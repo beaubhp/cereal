@@ -161,7 +161,8 @@ export function stopMeetingMonitor(): void {
     clearInterval(pollInterval)
     pollInterval = null
   }
-  micEventListeners.clear()
+  // Listener lifecycle is owned by subscribers (via the unsubscribe function
+  // returned from onMicEvent). Don't clear them here.
   const a = loadAddon()
   if (!a) return
   a.stopMeetingMonitor()
