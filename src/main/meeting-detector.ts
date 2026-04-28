@@ -240,7 +240,10 @@ class MeetingDetectorService {
     const browserName = BROWSER_BUNDLE_IDS[bundleId] ?? BROWSER_BUNDLE_IDS[normalized]
     if (browserName) {
       try {
-        const titles = await audioCapture.queryBrowserWindows(bundleId)
+        // Browser windows are owned by the parent process bundle ID, not by helpers
+        // (e.g. mic fires under com.google.Chrome.helper but windows belong to
+        // com.google.Chrome). Always query against the normalized parent ID.
+        const titles = await audioCapture.queryBrowserWindows(normalized)
         for (const title of titles) {
           for (const { pattern, service } of WINDOW_TITLE_PATTERNS) {
             if (pattern.test(title)) return service
