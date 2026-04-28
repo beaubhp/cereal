@@ -3,7 +3,6 @@ import { getAddonPath } from './native'
 
 interface MicEvent {
   bundleId: string
-  appName: string
   micActive: boolean
 }
 
@@ -18,8 +17,9 @@ interface AudioCaptureAddon {
   ) => Promise<void>
   stopCapture: () => Promise<void>
   getCaptureState: () => string
-  startMeetingMonitor: (callback: (event: MicEvent) => void) => void
+  startMeetingMonitor: () => void
   stopMeetingMonitor: () => void
+  pollMeetingState: () => MicEvent[]
   queryBrowserWindows: (bundleId: string, callback: (titles: string[]) => void) => void
 }
 
@@ -129,17 +129,39 @@ export function getAudioCaptureLoadError(): string | null {
 export type MicEventListener = (event: MicEvent) => void
 const micEventListeners: Set<MicEventListener> = new Set()
 
+const POLL_INTERVAL_MS = 2000
+let pollInterval: ReturnType<typeof setInterval> | null = null
+
 export function startMeetingMonitor(): void {
   const a = loadAddon()
   if (!a) throw new Error(loadError ?? 'Audio capture addon not loaded')
-  a.startMeetingMonitor((event) => {
-    for (const listener of micEventListeners) {
-      listener(event)
+
+  // Native side keeps a snapshot of active mic users; pollMeetingState returns
+  // deltas. Polling is driven from the JS thread because CoreAudio queries from
+  // background queues crash on some systems.
+  a.startMeetingMonitor()
+
+  if (pollInterval) clearInterval(pollInterval)
+  pollInterval = setInterval(() => {
+    try {
+      const events = a.pollMeetingState()
+      for (const event of events) {
+        for (const listener of micEventListeners) {
+          listener(event)
+        }
+      }
+    } catch (err) {
+      console.error('[meeting monitor] poll failed:', err)
     }
-  })
+  }, POLL_INTERVAL_MS)
 }
 
 export function stopMeetingMonitor(): void {
+  if (pollInterval) {
+    clearInterval(pollInterval)
+    pollInterval = null
+  }
+  micEventListeners.clear()
   const a = loadAddon()
   if (!a) return
   a.stopMeetingMonitor()

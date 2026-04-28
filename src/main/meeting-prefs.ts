@@ -22,5 +22,9 @@ export function getMeetingPref(bundleId: string): AppPreference {
 export function setMeetingPref(bundleId: string, pref: AppPreference): void {
   const prefs = readPrefs()
   prefs[bundleId] = pref
-  writeFileSync(PREFS_PATH, JSON.stringify(prefs, null, 2))
+  try {
+    writeFileSync(PREFS_PATH, JSON.stringify(prefs, null, 2))
+  } catch (err) {
+    console.error('Failed to persist meeting preferences:', err)
+  }
 }

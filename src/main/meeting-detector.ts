@@ -41,6 +41,17 @@ const WINDOW_TITLE_PATTERNS: Array<{ pattern: RegExp; service: string }> = [
 ]
 
 const GRACE_PERIOD_MS = 30_000
+// If the mic was off longer than this before reactivating, treat the rejoin as a
+// real "left and came back" rather than a mute toggle / network blip.
+const REPROMPT_THRESHOLD_MS = 5_000
+
+// Strip helper suffixes so child processes (e.g. "com.tinyspeck.slackmacgap.helper")
+// resolve to their parent app's bundle ID
+function normalizeBundleId(bundleId: string): string {
+  return bundleId
+    .replace(/\.helper(\.[a-z]+)?$/i, '')
+    .replace(/\.Helper(\s+\([^)]+\))?$/i, '')
+}
 
 type EventListener = (event: MeetingDetectionEvent) => void
 type StateListener = (state: MeetingDetectionState) => void
@@ -51,19 +62,18 @@ class MeetingDetectorService {
   private currentMeeting: MeetingInfo | null = null
   private micEventUnsubscribe: (() => void) | null = null
   private graceTimer: ReturnType<typeof setTimeout> | null = null
+  private userResponded = false
+  private lastMicDeactivationTime: number | null = null
 
   private readonly eventListeners = new Set<EventListener>()
   private readonly stateListeners = new Set<StateListener>()
   private readonly recordingRequestListeners = new Set<RecordingRequestListener>()
 
   start(): void {
-    if (this.micEventUnsubscribe) {
-      console.warn('Meeting detector already running')
-      return
-    }
+    if (this.micEventUnsubscribe) return
 
-    // Subscribe before starting the native monitor — SyncProcessList() fires
-    // events synchronously for already-active processes during startup
+    // Subscribe before starting the native monitor — already-active processes
+    // are reported on the first poll
     this.micEventUnsubscribe = audioCapture.onMicEvent(this.handleMicEvent)
 
     try {
@@ -72,9 +82,7 @@ class MeetingDetectorService {
       this.micEventUnsubscribe()
       this.micEventUnsubscribe = null
       console.error('Failed to start meeting monitor:', err)
-      return
     }
-    console.log('Meeting detection started')
   }
 
   stop(): void {
@@ -113,6 +121,7 @@ class MeetingDetectorService {
     if (!this.currentMeeting) return
 
     const meeting = this.currentMeeting
+    this.userResponded = true
 
     if (response === 'always' || response === 'never') {
       setMeetingPref(meeting.bundleId, response)
@@ -142,7 +151,7 @@ class MeetingDetectorService {
 
   private handleMicEvent: MicEventListener = (event) => {
     if (event.micActive) {
-      this.handleMicActivated(event.bundleId, event.appName).catch((err) => {
+      this.handleMicActivated(event.bundleId).catch((err) => {
         console.error('Meeting detection error:', err)
       })
     } else {
@@ -150,12 +159,22 @@ class MeetingDetectorService {
     }
   }
 
-  private async handleMicActivated(bundleId: string, appName: string): Promise<void> {
+  private async handleMicActivated(bundleId: string): Promise<void> {
     // Clear any pending grace timer (mic came back)
     this.clearGraceTimer()
 
-    // If we're already tracking a meeting from the same app, this is just a mic toggle
-    if (this.currentMeeting && this.currentMeeting.bundleId === bundleId) return
+    const inactiveMs = this.lastMicDeactivationTime
+      ? Date.now() - this.lastMicDeactivationTime
+      : 0
+    this.lastMicDeactivationTime = null
+
+    // Same meeting still in progress: decide whether to re-prompt
+    if (this.currentMeeting && this.currentMeeting.bundleId === bundleId) {
+      if (this.userResponded) return                       // user already answered, respect it
+      if (inactiveMs < REPROMPT_THRESHOLD_MS) return       // mute toggle / brief blip
+      this.showNotification(this.currentMeeting)           // ignored before, give another shot
+      return
+    }
 
     // If a different app activated the mic, end the old meeting and track the new one
     if (this.currentMeeting) {
@@ -165,7 +184,10 @@ class MeetingDetectorService {
     }
 
     // Identify the app (may be async for browser window title queries)
-    const displayName = await this.identifyApp(bundleId, appName)
+    const displayName = await this.identifyApp(bundleId)
+
+    // Skip unknown apps — only notify for recognized meeting apps and browsers
+    if (!displayName) return
 
     // Re-check after await — another event may have claimed the slot while we yielded
     if (this.currentMeeting) return
@@ -176,6 +198,7 @@ class MeetingDetectorService {
 
     const meeting: MeetingInfo = { app: displayName, bundleId }
     this.currentMeeting = meeting
+    this.userResponded = false
     this.setState('meeting-detected')
     this.emitEvent({ type: 'meeting-started', meeting })
 
@@ -189,6 +212,8 @@ class MeetingDetectorService {
   private handleMicDeactivated(bundleId: string): void {
     if (!this.currentMeeting || this.currentMeeting.bundleId !== bundleId) return
 
+    this.lastMicDeactivationTime = Date.now()
+
     // Start grace period — mic may come back (mute/unmute, brief glitch)
     this.clearGraceTimer()
     this.graceTimer = setTimeout(() => {
@@ -196,19 +221,23 @@ class MeetingDetectorService {
       const meeting = this.currentMeeting
       if (meeting) {
         this.currentMeeting = null
+        this.userResponded = false
+        this.lastMicDeactivationTime = null
         this.setState('idle')
         this.emitEvent({ type: 'meeting-ended', meeting })
       }
     }, GRACE_PERIOD_MS)
   }
 
-  private async identifyApp(bundleId: string, appName: string): Promise<string> {
-    // Check known native meeting apps first
-    const knownName = KNOWN_MEETING_APPS[bundleId]
+  private async identifyApp(bundleId: string): Promise<string | null> {
+    const normalized = normalizeBundleId(bundleId)
+
+    // Check known native meeting apps (try original + normalized for helper processes)
+    const knownName = KNOWN_MEETING_APPS[bundleId] ?? KNOWN_MEETING_APPS[normalized]
     if (knownName) return knownName
 
     // Check if it's a browser — need window title matching
-    const browserName = BROWSER_BUNDLE_IDS[bundleId]
+    const browserName = BROWSER_BUNDLE_IDS[bundleId] ?? BROWSER_BUNDLE_IDS[normalized]
     if (browserName) {
       try {
         const titles = await audioCapture.queryBrowserWindows(bundleId)
@@ -224,22 +253,26 @@ class MeetingDetectorService {
       return `Call in ${browserName}`
     }
 
-    // Unknown app — use the app name from CoreAudio
-    return appName || bundleId
+    // Unknown app — skip to avoid false positives from random mic users (Voice Memos, etc.)
+    return null
   }
 
   private showNotification(meeting: MeetingInfo): void {
-    const notification = new Notification({
-      title: 'Meeting Detected',
-      body: `Looks like you're in ${meeting.app}. Click to record.`
-    })
+    try {
+      const notification = new Notification({
+        title: 'Meeting Detected',
+        body: `Looks like you're in ${meeting.app}. Click to record.`
+      })
 
-    notification.on('click', () => {
-      this.respondToPrompt('yes')
-    })
+      notification.on('click', () => {
+        this.respondToPrompt('yes')
+      })
 
-    notification.show()
-    this.emitEvent({ type: 'prompt-shown', meeting })
+      notification.show()
+      this.emitEvent({ type: 'prompt-shown', meeting })
+    } catch (err) {
+      console.error('Failed to show meeting notification:', err)
+    }
   }
 
   private setState(state: MeetingDetectionState): void {

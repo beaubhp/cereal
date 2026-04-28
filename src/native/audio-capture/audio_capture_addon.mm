@@ -405,6 +405,7 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("getCaptureState", Napi::Function::New(env, GetCaptureState));
     exports.Set("startMeetingMonitor", Napi::Function::New(env, StartMeetingMonitor));
     exports.Set("stopMeetingMonitor", Napi::Function::New(env, StopMeetingMonitor));
+    exports.Set("pollMeetingState", Napi::Function::New(env, PollMeetingState));
     exports.Set("queryBrowserWindows", Napi::Function::New(env, QueryBrowserWindows));
     return exports;
 }
