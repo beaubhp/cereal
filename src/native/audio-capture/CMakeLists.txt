@@ -21,6 +21,8 @@ add_library(audio_capture SHARED
   audio_capture_addon.mm
   mic_capturer.mm
   screen_audio_capturer.mm
+  meeting_detector.mm
+  window_title_matcher.mm
 )
 
 # Set properties for Node.js native addon
@@ -30,18 +32,23 @@ set_target_properties(audio_capture PROPERTIES
   CXX_STANDARD 17
 )
 
-# Compile .mm files as ObjC++
+# Compile .mm files as ObjC++ with ARC enabled. Without -fobjc-arc, ObjC objects
+# stored in globals/statics don't get retained on assignment, leading to dangling
+# pointers when autorelease pools drain.
 set_source_files_properties(
   audio_capture_addon.mm
   mic_capturer.mm
   screen_audio_capturer.mm
-  PROPERTIES COMPILE_FLAGS "-x objective-c++ -fmodules"
+  meeting_detector.mm
+  window_title_matcher.mm
+  PROPERTIES COMPILE_FLAGS "-x objective-c++ -fmodules -fobjc-arc"
 )
 
 # Link cmake-js and macOS frameworks
 target_link_libraries(audio_capture
   ${CMAKE_JS_LIB}
   "-framework Foundation"
+  "-framework AppKit"
   "-framework ScreenCaptureKit"
   "-framework CoreMedia"
   "-framework AVFoundation"
