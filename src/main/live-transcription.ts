@@ -22,7 +22,8 @@ interface TimeNormalizerState {
   lastNormalizedEndSec: number
 }
 
-const MODEL_ENV_VAR = 'CEREAL_WHISPER_MODEL_PATH'
+const WHISPER_MODEL_NAME = 'large-v3-v20240930_626MB'
+const WHISPER_MODEL_DIR_NAME = 'whisper-large-v3'
 const HOLD_BACK_MS = 300
 const FLUSH_INTERVAL_MS = 100
 const SYSTEM_VERSION_ERROR =
@@ -112,7 +113,7 @@ class LiveTranscriptionService {
     }
 
     ensureSupportedMacOS()
-    const modelPath = resolveModelPath()
+    const modelPath = findBundledWhisperModelPath()
 
     this.state = 'starting'
     this.normalizer.reset()
@@ -121,7 +122,7 @@ class LiveTranscriptionService {
     this.sessionId = randomUUID()
 
     try {
-      await this.client.loadModel(modelPath)
+      await this.client.loadModel(WHISPER_MODEL_NAME, modelPath)
       await this.client.startSession(this.sessionId)
 
       this.audioErrorUnsubscribe = audioCapture.onError((message) => {
@@ -392,28 +393,12 @@ function comparePendingSegments(left: PendingSegment, right: PendingSegment): nu
   return left.segment.source === 'mic' ? -1 : 1
 }
 
-function resolveModelPath(): string {
-  const devModelPath = app.isPackaged
-    ? undefined
-    : join(app.getAppPath(), 'resources', 'models', 'whisper-large-v3')
+function findBundledWhisperModelPath(): string | undefined {
+  const modelPath = app.isPackaged
+    ? join(process.resourcesPath, 'models', WHISPER_MODEL_DIR_NAME)
+    : join(app.getAppPath(), 'resources', 'models', WHISPER_MODEL_DIR_NAME)
 
-  const candidates = [
-    process.env[MODEL_ENV_VAR],
-    'resourcesPath' in process && typeof process.resourcesPath === 'string'
-      ? `${process.resourcesPath}/models/whisper-large-v3`
-      : undefined,
-    devModelPath
-  ]
-
-  for (const candidate of candidates) {
-    if (candidate && existsSync(candidate)) {
-      return candidate
-    }
-  }
-
-  throw new Error(
-    `Whisper model directory not found. Set ${MODEL_ENV_VAR} or package the model into Contents/Resources/models/whisper-large-v3.`
-  )
+  return existsSync(modelPath) ? modelPath : undefined
 }
 
 function ensureSupportedMacOS(): void {

@@ -6,7 +6,8 @@ type StreamSource = 'mic' | 'system'
 
 interface InitializeCommand {
   type: 'initialize'
-  modelPath: string
+  modelName: string
+  modelPath?: string
   sampleRate: 16000
   segmentMode: 'final-only'
 }
@@ -100,6 +101,7 @@ type SegmentListener = (event: HelperSegmentEvent) => void
 type ErrorListener = (event: FatalEvent | WarningEvent) => void
 
 const EVENT_TIMEOUT_MS = 30_000
+const MODEL_DOWNLOAD_TIMEOUT_MS = 20 * 60_000
 const SHUTDOWN_TIMEOUT_MS = 5_000
 
 export class TranscriberClient {
@@ -108,22 +110,24 @@ export class TranscriberClient {
   private waiters = new Set<Waiter>()
   private segmentListeners = new Set<SegmentListener>()
   private errorListeners = new Set<ErrorListener>()
-  private initializedModelPath: string | null = null
+  private initializedModelKey: string | null = null
   private expectedExit = false
   private shutdownPromise: Promise<void> | null = null
 
-  async loadModel(modelPath: string): Promise<void> {
-    if (this.initializedModelPath === modelPath && this.child) {
+  async loadModel(modelName: string, modelPath?: string): Promise<void> {
+    const modelKey = getModelLoadKey(modelName, modelPath)
+    if (this.initializedModelKey === modelKey && this.child) {
       return
     }
 
-    if (this.child && this.initializedModelPath !== modelPath) {
+    if (this.child && this.initializedModelKey !== modelKey) {
       await this.shutdown()
     }
 
     this.ensureSpawned()
     this.writeCommand({
       type: 'initialize',
+      modelName,
       modelPath,
       sampleRate: 16000,
       segmentMode: 'final-only'
@@ -131,10 +135,10 @@ export class TranscriberClient {
 
     await this.waitForEvent(
       (event): event is InitializedEvent => event.type === 'initialized',
-      EVENT_TIMEOUT_MS,
+      modelPath ? EVENT_TIMEOUT_MS : MODEL_DOWNLOAD_TIMEOUT_MS,
       'Timed out waiting for transcriber helper initialization'
     )
-    this.initializedModelPath = modelPath
+    this.initializedModelKey = modelKey
   }
 
   async startSession(sessionId: string): Promise<void> {
@@ -280,7 +284,7 @@ export class TranscriberClient {
         : `Transcriber helper exited with code ${code ?? 'unknown'}`
 
       this.child = null
-      this.initializedModelPath = null
+      this.initializedModelKey = null
 
       if (exitedUnexpectedly) {
         this.handleFatal({
@@ -397,9 +401,16 @@ export class TranscriberClient {
 
   private finishShutdown(): void {
     this.child = null
-    this.initializedModelPath = null
+    this.initializedModelKey = null
     this.expectedExit = false
     this.shutdownPromise = null
     this.rejectWaiters(new Error('Transcriber helper shut down'))
   }
+}
+
+function getModelLoadKey(modelName: string, modelPath?: string): string {
+  return JSON.stringify({
+    modelName,
+    modelPath: modelPath ?? null
+  })
 }

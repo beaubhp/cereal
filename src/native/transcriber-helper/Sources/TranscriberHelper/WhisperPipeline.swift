@@ -25,6 +25,8 @@ actor WhisperPipeline {
     private let trimContextSeconds = 5.0
     private let activityRmsThreshold: Float = 0.003
     private let activityPeakThreshold: Float = 0.015
+    private let defaultModelRepoOwner = "argmaxinc"
+    private let defaultModelRepoName = "whisperkit-coreml"
 
     private var whisperKit: WhisperKit?
     private var sessionId: String?
@@ -37,28 +39,67 @@ actor WhisperPipeline {
     private var drainTask: Task<Void, Never>?
     private var drainTaskGeneration: Int?
 
-    func initialize(modelPath: String, sampleRate: Int, segmentMode: String) async throws {
+    func initialize(modelName: String, modelPath: String?, sampleRate: Int, segmentMode: String) async throws {
         guard sampleRate == self.sampleRate else {
             throw HelperError.invalidSampleRate(sampleRate)
         }
         guard segmentMode == "final-only" else {
             throw HelperError.invalidSegmentMode(segmentMode)
         }
-        guard FileManager.default.fileExists(atPath: modelPath) else {
+        if let modelPath, !FileManager.default.fileExists(atPath: modelPath) {
             throw HelperError.missingModel(modelPath)
         }
+        let resolvedModelPath = modelPath ?? cachedModelPath(for: modelName)
+        let shouldDownloadModel = resolvedModelPath == nil
 
         let config = WhisperKitConfig(
-            model: "large-v3",
-            modelFolder: modelPath,
+            model: modelName,
+            modelFolder: resolvedModelPath,
             verbose: false,
             logLevel: .none,
             prewarm: false,
             load: true,
-            download: false
+            download: shouldDownloadModel
         )
-        whisperKit = try await WhisperKit(config)
-        EventWriter.write(InitializedEvent(model: modelPath))
+        let kit = try await WhisperKit(config)
+        whisperKit = kit
+        EventWriter.write(InitializedEvent(model: kit.modelFolder?.path ?? modelName))
+    }
+
+    private func cachedModelPath(for modelName: String) -> String? {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        let cacheRoot = documents
+            .appendingPathComponent("huggingface")
+            .appendingPathComponent("models")
+            .appendingPathComponent(defaultModelRepoOwner)
+            .appendingPathComponent(defaultModelRepoName)
+
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: cacheRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        return contents
+            .filter { isDirectory($0) && $0.lastPathComponent.contains(modelName) }
+            .first(where: hasRequiredWhisperModels)?
+            .path
+    }
+
+    private func hasRequiredWhisperModels(in folder: URL) -> Bool {
+        ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy { modelName in
+            let modelURL = ModelUtilities.detectModelURL(inFolder: folder, named: modelName)
+            return FileManager.default.fileExists(atPath: modelURL.path)
+        }
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
     }
 
     func startSession(sessionId: String, streams requestedStreams: [StreamSource]) throws {

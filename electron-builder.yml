@@ -17,6 +17,10 @@ extraResources:
     filter:
       - "tray-bowl.png"
       - "tray-bowl@2x.png"
+  - from: "resources/models/"
+    to: "models/"
+    filter:
+      - "**/*"
 mac:
   target:
     - target: dmg
