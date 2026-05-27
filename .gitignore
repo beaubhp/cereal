@@ -1,4 +1,5 @@
 node_modules/
+.electron-native/
 dist/
 out/
 build/*

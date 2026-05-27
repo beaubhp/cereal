@@ -3,10 +3,13 @@ productName: Cereal
 directories:
   buildResources: build
   output: dist
+npmRebuild: false
 files:
   - "out/**/*"
-  - "!node_modules"
+  - "package.json"
 extraResources:
+  - from: ".electron-native/node_modules/"
+    to: "electron-native/node_modules/"
   - from: "src/native/build/Release/"
     to: "native/"
     filter:
