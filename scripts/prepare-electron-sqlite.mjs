@@ -28,6 +28,14 @@ function normalizeVersion(versionRange, packageName) {
   return version
 }
 
+function appendFlags(existingFlags, flagsToAppend) {
+  const existing = String(existingFlags ?? '').trim()
+  const existingParts = existing ? existing.split(/\s+/) : []
+  const missingFlags = flagsToAppend.filter((flag) => !existingParts.includes(flag))
+
+  return [...existingParts, ...missingFlags].join(' ')
+}
+
 if (!existsSync(rootBetterSqlitePackagePath)) {
   fail('better-sqlite3 is not installed. Run npm install before preparing Electron SQLite.')
 }
@@ -39,6 +47,14 @@ const rootPackage = readJson(rootPackagePath)
 const rootBetterSqlitePackage = readJson(rootBetterSqlitePackagePath)
 const electronVersion = normalizeVersion(rootPackage.devDependencies?.electron, 'electron')
 const betterSqliteVersion = rootBetterSqlitePackage.version
+const quietNativeBuildEnv = {
+  ...process.env,
+  CXXFLAGS: appendFlags(process.env.CXXFLAGS, [
+    '-Wno-deprecated-declarations',
+    '-Wno-cast-function-type-mismatch'
+  ]),
+  npm_config_loglevel: process.env.npm_config_loglevel ?? 'error'
+}
 
 mkdirSync(electronNativeDir, { recursive: true })
 writeFileSync(
@@ -61,6 +77,7 @@ execFileSync(
   ['install', '--prefix', electronNativeDir, '--omit=dev', '--package-lock=false', '--no-audit', '--no-fund'],
   {
     cwd: repoRoot,
+    env: quietNativeBuildEnv,
     stdio: 'inherit'
   }
 )
@@ -76,10 +93,12 @@ execFileSync(
     'arm64',
     '--dist-url=https://www.electronjs.org/headers',
     '--build-from-source',
-    '--release'
+    '--release',
+    '--loglevel=error'
   ],
   {
     cwd: electronBetterSqliteDir,
+    env: quietNativeBuildEnv,
     stdio: 'inherit'
   }
 )
