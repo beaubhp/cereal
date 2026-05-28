@@ -11,7 +11,8 @@ struct CommandEnvelope: Decodable {
 
 struct InitializeCommand: Decodable {
     let type: String
-    let modelPath: String
+    let modelName: String
+    let modelPath: String?
     let sampleRate: Int
     let segmentMode: String
 }

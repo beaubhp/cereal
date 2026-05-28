@@ -17,6 +17,7 @@ while let line = readLine() {
             switch command {
             case let .initialize(value):
                 try await pipeline.initialize(
+                    modelName: value.modelName,
                     modelPath: value.modelPath,
                     sampleRate: value.sampleRate,
                     segmentMode: value.segmentMode

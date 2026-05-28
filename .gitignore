@@ -12,3 +12,5 @@ cereal-tmp/
 src/native/build/
 **/.build/
 **/.swiftpm/
+resources/models/*
+!resources/models/README.md
